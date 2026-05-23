@@ -7,6 +7,9 @@ Supports OpenAI-compatible APIs (e.g., Ollama).
 """
 
 import argparse
+import json
+import os
+import random
 import signal
 import sys
 import threading
@@ -121,12 +124,24 @@ and the societal impacts including both benefits and concerns.
 Be thorough and detailed in your response, providing specific examples and dates."""
 
     def __init__(self, base_url: str, endpoint: str, parallel: int, 
-                 prompt: str, duration: int, model: Optional[str] = None):
+                 prompt: Optional[str], duration: int, model: Optional[str] = None):
         self.base_url = base_url.rstrip('/')
         self.endpoint = endpoint
         self.parallel = parallel
-        self.prompt = prompt
         self.duration = duration
+        
+        # Load prompts: use single prompt if provided, otherwise load and shuffle from file
+        if prompt is not None:
+            self.prompts = [prompt]
+            self.use_random_prompts = False
+        else:
+            self.prompts = self._load_prompts()
+            self.use_random_prompts = True
+            # Shuffle once at startup
+            random.shuffle(self.prompts)
+        
+        self.current_prompt_index = 0
+        self.prompt_lock = threading.Lock()
         
         self.api_url = f"{self.base_url}/v1/{'chat/completions' if endpoint == 'chat' else 'completions'}"
         self.model = model if model else self._detect_model()
@@ -139,6 +154,31 @@ Be thorough and detailed in your response, providing specific examples and dates
         self.stats_thread = None
         
         self._setup_signal_handlers()
+    
+    def _load_prompts(self) -> List[str]:
+        """Load prompts from prompts.json file."""
+        # Determine the path to prompts.json (same directory as this file)
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        prompts_path = os.path.join(module_dir, 'prompts.json')
+        
+        try:
+            with open(prompts_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                prompts = data.get('prompts', [])
+                if prompts:
+                    return prompts
+        except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+            print(f"Warning: Could not load prompts.json ({e}), using default prompt.")
+        
+        # Fallback to default prompt
+        return [self.DEFAULT_PROMPT]
+    
+    def _get_next_prompt(self) -> str:
+        """Get the next prompt in the cycle (thread-safe)."""
+        with self.prompt_lock:
+            prompt = self.prompts[self.current_prompt_index]
+            self.current_prompt_index = (self.current_prompt_index + 1) % len(self.prompts)
+            return prompt
     
     def _detect_model(self) -> str:
         """Try to detect the model name from Ollama API."""
@@ -171,17 +211,20 @@ Be thorough and detailed in your response, providing specific examples and dates
     
     def _make_request(self, thread_id: int) -> Optional[RequestResult]:
         """Make a single API request and return result."""
+        # Get the prompt to use for this request
+        prompt = self._get_next_prompt()
+        
         try:
             if self.endpoint == 'chat':
                 payload = {
                     "model": self.model,
-                    "messages": [{"role": "user", "content": self.prompt}],
+                    "messages": [{"role": "user", "content": prompt}],
                     "stream": False
                 }
             else:
                 payload = {
                     "model": self.model,
-                    "prompt": self.prompt,
+                    "prompt": prompt,
                     "stream": False
                 }
             
@@ -291,6 +334,10 @@ Be thorough and detailed in your response, providing specific examples and dates
         print(f"  Model: {self.model}")
         print(f"  Parallel workers: {self.parallel}")
         print(f"  Duration: {self.duration}s")
+        if self.use_random_prompts:
+            print(f"  Prompts: {len(self.prompts)} randomized (shuffled once, cycling)")
+        else:
+            print(f"  Prompts: single custom prompt")
         print(f"  Press Ctrl+C once for soft stop (30s timeout), twice for hard stop\n")
         
         # Start global timer
@@ -404,8 +451,8 @@ Examples:
     
     parser.add_argument(
         "--prompt",
-        default=InferenceSpeedTest.DEFAULT_PROMPT,
-        help="Prompt to send to the model (default: long essay prompt)"
+        default=None,
+        help="Use a single custom prompt instead of randomized prompts from prompts.json"
     )
     
     parser.add_argument(

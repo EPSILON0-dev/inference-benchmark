@@ -1,6 +1,7 @@
 *
 !.gitignore
 !src/*.py
+!src/*.json
 !src/
 !LICENSE
 !README.md
